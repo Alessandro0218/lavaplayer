@@ -19,6 +19,8 @@ import org.apache.http.client.utils.URIBuilder;
 import org.apache.http.impl.client.HttpClientBuilder;
 import org.apache.http.util.EntityUtils;
 import org.jetbrains.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.DataInput;
 import java.io.DataOutput;
@@ -41,6 +43,8 @@ import static com.sedmelluq.discord.lavaplayer.tools.FriendlyException.Severity.
  * Audio source manager that implements finding SoundCloud tracks based on URL.
  */
 public class SoundCloudAudioSourceManager implements AudioSourceManager, HttpConfigurable {
+    private static final Logger log = LoggerFactory.getLogger(SoundCloudAudioSourceManager.class);
+
     private static final int DEFAULT_SEARCH_RESULTS = 10;
     private static final int MAXIMUM_SEARCH_RESULTS = 200;
 
@@ -267,6 +271,18 @@ public class SoundCloudAudioSourceManager implements AudioSourceManager, HttpCon
         return buildTrackFromInfo(dataReader.readTrackInfo(trackData, formatHandler.buildFormatIdentifier(format)));
     }
 
+    /**
+     * Adds the track unless none of its formats can be played (a DRM-only release, say): one such track among the
+     * results must not fail the whole search or list.
+     */
+    private void addPlayableTrack(List<AudioTrack> tracks, JsonBrowser trackData) {
+        try {
+            tracks.add(loadFromTrackData(trackData));
+        } catch (FriendlyException e) {
+            log.debug("Skipping SoundCloud track {}: {}", trackData.get("id").text(), e.getMessage());
+        }
+    }
+
     private AudioTrack buildTrackFromInfo(AudioTrackInfo trackInfo) {
         return new SoundCloudAudioTrack(trackInfo, this);
     }
@@ -316,7 +332,7 @@ public class SoundCloudAudioSourceManager implements AudioSourceManager, HttpCon
 
             if (!trackItem.isNull() && !dataReader.isTrackBlocked(trackItem)) {
                 if (!filterOutPreviewTracks || !isPreviewTrack(trackItem)) {
-                    tracks.add(loadFromTrackData(trackItem));
+                    addPlayableTrack(tracks, trackItem);
                 }
             }
         }
@@ -394,7 +410,7 @@ public class SoundCloudAudioSourceManager implements AudioSourceManager, HttpCon
         for (JsonBrowser item : searchResults.get("collection").values()) {
             if (!item.isNull()) {
                 if (!filterOutPreviewTracks || !isPreviewTrack(item)) {
-                    tracks.add(loadFromTrackData(item));
+                    addPlayableTrack(tracks, item);
                 }
             }
         }

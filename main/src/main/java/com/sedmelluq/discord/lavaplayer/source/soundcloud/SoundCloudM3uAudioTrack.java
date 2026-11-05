@@ -1,9 +1,9 @@
 package com.sedmelluq.discord.lavaplayer.source.soundcloud;
 
 import com.sedmelluq.discord.lavaplayer.container.playlists.HlsStreamSegment;
-import com.sedmelluq.discord.lavaplayer.container.playlists.HlsStreamSegmentParser;
 import com.sedmelluq.discord.lavaplayer.tools.http.HttpStreamTools;
 import com.sedmelluq.discord.lavaplayer.tools.io.ChainedInputStream;
+import com.sedmelluq.discord.lavaplayer.tools.io.HttpClientTools;
 import com.sedmelluq.discord.lavaplayer.tools.io.HttpInterface;
 import com.sedmelluq.discord.lavaplayer.tools.io.NonSeekableInputStream;
 import com.sedmelluq.discord.lavaplayer.tools.io.SeekableInputStream;
@@ -47,28 +47,29 @@ public class SoundCloudM3uAudioTrack extends DelegatedAudioTrack {
         }
     }
 
-    private List<HlsStreamSegment> loadSegments() throws IOException {
+    private SoundCloudSegmentList loadSegments() throws IOException {
         String playbackUrl = SoundCloudHelper.loadPlaybackUrl(httpInterface, m3uInfo.lookupUrl);
-        return HlsStreamSegmentParser.parseFromUrl(httpInterface, playbackUrl);
+        String[] lines = HttpClientTools.fetchResponseLines(httpInterface, new HttpGet(playbackUrl), "stream segments list");
+        return SoundCloudSegmentList.parse(lines, playbackUrl);
     }
 
     private SegmentTracker createSegmentTracker() throws IOException {
-        List<HlsStreamSegment> initialSegments = loadSegments();
-        SegmentTracker tracker = new SegmentTracker(initialSegments);
+        SegmentTracker tracker = new SegmentTracker(new SoundCloudSegmentCursor(loadSegments()));
         tracker.setupDecoder(m3uInfo.decoderFactory);
         return tracker;
     }
 
     private class SegmentTracker implements AutoCloseable {
+        private final SoundCloudSegmentCursor cursor;
         private final List<HlsStreamSegment> segments;
         private long desiredPosition = 0;
         private long streamStartPosition = 0;
         private long lastUpdate;
         private SoundCloudSegmentDecoder decoder;
-        private int segmentIndex = 0;
 
-        private SegmentTracker(List<HlsStreamSegment> segments) {
-            this.segments = segments;
+        private SegmentTracker(SoundCloudSegmentCursor cursor) {
+            this.cursor = cursor;
+            this.segments = cursor.segments();
             this.lastUpdate = System.currentTimeMillis();
         }
 
@@ -77,6 +78,7 @@ public class SoundCloudM3uAudioTrack extends DelegatedAudioTrack {
         }
 
         private SeekableInputStream createChainedStream() {
+            cursor.startChain();
             return new NonSeekableInputStream(new ChainedInputStream(this::getNextStream));
         }
 
@@ -106,7 +108,7 @@ public class SoundCloudM3uAudioTrack extends DelegatedAudioTrack {
         private void seekToSegment(int index, long requestedTimecode, long segmentTimecode) throws IOException {
             decoder.resetStream();
 
-            segmentIndex = index;
+            cursor.seekToSegment(index);
             desiredPosition = requestedTimecode;
             streamStartPosition = segmentTimecode;
 
@@ -116,22 +118,27 @@ public class SoundCloudM3uAudioTrack extends DelegatedAudioTrack {
         private void seekToEnd() throws IOException {
             decoder.resetStream();
 
-            segmentIndex = segments.size();
+            cursor.seekToEnd();
         }
 
         private InputStream getNextStream() {
-            HlsStreamSegment segment = getNextSegment();
+            if (cursor.hasMoreSegments()) {
+                checkSegmentListUpdate();
+            }
 
-            if (segment == null) {
+            String url = cursor.nextUrl();
+
+            if (url == null) {
                 return null;
             }
 
-            return HttpStreamTools.streamContent(httpInterface, new HttpGet(segment.url));
+            return HttpStreamTools.streamContent(httpInterface, new HttpGet(url));
         }
 
         private void updateSegmentList() {
             try {
-                List<HlsStreamSegment> newSegments = loadSegments();
+                SoundCloudSegmentList refreshed = loadSegments();
+                List<HlsStreamSegment> newSegments = refreshed.segments;
 
                 if (newSegments.size() != segments.size()) {
                     log.error("For {}, received different number of segments on update, skipping.", trackInfo.identifier);
@@ -145,9 +152,7 @@ public class SoundCloudM3uAudioTrack extends DelegatedAudioTrack {
                     }
                 }
 
-                for (int i = 0; i < segments.size(); i++) {
-                    segments.set(i, newSegments.get(i));
-                }
+                cursor.replace(refreshed);
             } catch (Exception e) {
                 log.error("For {}, failed to update segment list, skipping.", trackInfo.identifier, e);
             }
@@ -162,17 +167,6 @@ public class SoundCloudM3uAudioTrack extends DelegatedAudioTrack {
 
                 updateSegmentList();
                 lastUpdate = now;
-            }
-        }
-
-        private HlsStreamSegment getNextSegment() {
-            int current = segmentIndex++;
-
-            if (current < segments.size()) {
-                checkSegmentListUpdate();
-                return segments.get(current);
-            } else {
-                return null;
             }
         }
 

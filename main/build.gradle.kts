@@ -6,6 +6,7 @@ import kotlin.io.path.writeText
 
 plugins {
     `java-library`
+    groovy
     alias(libs.plugins.maven.publish.base)
 }
 
@@ -52,6 +53,10 @@ tasks {
 
     classes {
         dependsOn(updateVersion)
+    }
+
+    test {
+        useJUnitPlatform()
     }
 }
 
